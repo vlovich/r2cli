@@ -127,7 +127,8 @@ class CandidatePaths {
       try {
         await new Promise<void>((resolve, reject) => fs.mkdir(parentDir, (err) => err ? reject(err) : resolve()))
       } catch (e) {
-        if (Object.prototype.hasOwnProperty.call(e, 'code') && (e as NodeJS.ErrnoException).code !== 'EEXIST') {
+        if (Object.prototype.hasOwnProperty.call(e, 'code') && (e as NodeJS.ErrnoException).code === 'EEXIST') {
+        } else {
           console.warn('Trouble creating path', parentDir, e)
           continue
         }
@@ -263,6 +264,85 @@ async function retrieveCreds(config: { account_id: string; access_key_id: string
   return Ok(secret_access_key)
 }
 
+async function removeCred(config: { account_id: string; access_key_id: string }): Promise<Result<void, Error>> {
+  const endpoint = `https://${config.account_id}.r2.cloudflarestorage.com`
+
+  console.log(
+    `Removing R2 token secret with id ${config.access_key_id} for ${endpoint} from your OS encrypted password storage.`,
+  )
+
+  const keytar = await loadKeytar()
+  if (keytar.err) {
+    return keytar
+  }
+
+  if (await keytar.val.deletePassword(endpoint, config.access_key_id)) {
+    return Ok.EMPTY
+  }
+
+  return Err(new Error('Unknown problem removing token secret'))
+}
+
+async function listCreds(account: string): Promise<Result<string[], Error>> {
+  const keytar = await loadKeytar()
+  if (keytar.err) {
+    return keytar
+  }
+
+  const endpoint = `https://${account}.r2.cloudflarestorage.com`
+
+  const creds = await keytar.val.findCredentials(endpoint)
+  return Ok(creds.map(({ account }) => account))
+}
+
+export async function listCredsCommand(argv: ArgumentsCamelCase<{ account: string }>): Promise<void> {
+  const keytar = await loadKeytar()
+  if (keytar.err) {
+    process.exitCode = 1
+    return
+  }
+
+  const endpoint = `https://${argv.account}.r2.cloudflarestorage.com`
+
+  for (const cred of await keytar.val.findCredentials(endpoint)) {
+    console.info(`Found token id ${cred.account}`)
+  }
+}
+
+export async function removeCredCommand(
+  argv: ArgumentsCamelCase<{ account: string; 'access-key-id'?: string }>,
+): Promise<void> {
+  let access_key_id = argv['access-key-id']
+  if (access_key_id === undefined) {
+    const choices = await listCreds(argv.account)
+    if (choices.err) {
+      process.exitCode = 1
+      return
+    }
+
+    if (choices.val.length === 0) {
+      console.info('No credentials found')
+      return
+    }
+
+    const prompt = inquirer.createPromptModule()
+    const answer = await prompt({
+      name: 'id',
+      message: `Which access key would you like to remove for account ${argv.account}`,
+      type: 'list',
+      choices: choices.val,
+    })
+
+    access_key_id = answer.id as string
+  }
+
+  const result = await removeCred({ account_id: argv.account, access_key_id })
+  if (result.err) {
+    process.exitCode = 1
+    return
+  }
+}
+
 export async function importConfig(argv: ArgumentsCamelCase): Promise<void> {
   const r2ConfigPaths = new CandidatePaths('cloudflare', 'r2.toml')
   const configFilePath = (await r2ConfigPaths.createInitialConfig()).unwrap()
@@ -334,7 +414,7 @@ export async function importConfig(argv: ArgumentsCamelCase): Promise<void> {
   console.info(`Imported ${numConfigurationsImported} ${importSource} configurations into ${configFilePath}`)
 }
 
-export async function initConfig(argv: ArgumentsCamelCase): Promise<void> {
+export async function initConfigCommand(argv: ArgumentsCamelCase): Promise<void> {
   // TODO: It would be nice to just navigate you through available accounts like wrangler does.
   // TODO: Use wrangler creds from ~/.wrangler/config/default.toml to communicate with the API.
   const name = argv['name'] as string
@@ -361,7 +441,7 @@ export async function initConfig(argv: ArgumentsCamelCase): Promise<void> {
   console.info(`Added configuration ${name} to ${configFilePath}`)
 }
 
-export async function listConfigs(): Promise<void> {
+export async function listConfigsCommand(): Promise<void> {
   const r2ConfigPaths = new CandidatePaths('cloudflare', 'r2.toml')
   const configFilePath = (await r2ConfigPaths.createInitialConfig()).unwrap()
   console.log(await readTextFile(configFilePath))
@@ -409,6 +489,31 @@ export async function retrieveOnlyConfig(): Promise<Result<Config, Error>> {
     access_key_id: info.access_key_id,
     secret_access_key: secretAccessKey.val,
   })
+}
+
+export async function removeConfigCommand(argv: ArgumentsCamelCase<{ name: string }>): Promise<void> {
+  const config = await retrieveConfig(argv.name)
+  if (config.err) {
+    process.exitCode = 1
+    return
+  }
+
+  const r2ConfigPaths = new CandidatePaths('cloudflare', 'r2.toml')
+  const configFilePath = (await r2ConfigPaths.createInitialConfig()).unwrap()
+  const existingConfig = TOML.parse(await readTextFile(configFilePath)) as Record<
+    string,
+    { account: string; access_key_id: string }
+  >
+  delete existingConfig[config.val.profile]
+
+  const removal = await removeCred(config.val)
+  if (removal.err) {
+    process.exitCode = 1
+    console.error(`Failed to remove creds for token ${config.val.access_key_id}`)
+    return
+  }
+
+  await writeTextFile(configFilePath, TOML.stringify(existingConfig))
 }
 
 export async function retrieveConfig(accountOrProfile: string): Promise<Result<Config, Error>> {

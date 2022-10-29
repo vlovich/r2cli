@@ -3,7 +3,7 @@ import cliProgress from 'cli-progress'
 import process from 'node:process'
 import { ArgumentsCamelCase } from 'yargs'
 import yargs from 'yargs/yargs'
-import { importConfig, initConfig, listConfigs } from './config'
+import { importConfig, initConfigCommand, listConfigsCommand, listCredsCommand as listCredsCommand, removeConfigCommand, removeCredCommand } from './config'
 import { buildS3Commands, GenericCmdArgs, handleS3Cmd } from './s3'
 
 interface ProgressBarOptions {
@@ -20,18 +20,50 @@ const argv =
         .command('import', 'Import your configuration from another tool', (yargs) => {
           yargs.option('r', { alias: 'rclone' })
         }, importConfig)
-        .command(['add', 'init'], 'Add an R2 account profile', (yargs) => {
+        .command(['add <name> <account>', 'init'], 'Add an R2 account profile', (yargs) => {
           yargs
-            .option('name', { describe: 'The name of the profile', requiresArg: true, type: 'string' })
-            .option('account', {
-              alias: 'a',
-              describe: 'The Cloudflare account ID with an R2 subscription',
+            .positional('name', {
+              describe: 'The name of the profile',
               requiresArg: true,
               type: 'string',
+              demandOption: true,
+            })
+            .positional('account', {
+              describe: 'The Cloudflare account ID with an R2 subscription',
+              type: 'string',
+              demandOption: true,
             })
             .demandOption(['name', 'account'])
-        }, initConfig)
-        .command(['list', 'ls'], 'List R2 accounts that are configured', () => {}, listConfigs)
+        }, initConfigCommand)
+        .command('rm <name|account>', 'Remove by profile name or account', (yargs) => {
+          yargs.positional('name', {
+            type: 'string',
+            description:
+              'The name of the profile or the account id. If multiple profiles match the account id you will be prompted which one to remove.',
+            demandOption: true,
+          })
+        }, removeConfigCommand)
+        .command(['list', 'ls'], 'List R2 accounts that are configured', () => {}, listConfigsCommand)
+        .command('list-creds <account>', 'List all R2 credentials saved', (yargs) => {
+          yargs.positional('account', {
+            type: 'string',
+            description: 'The Cloudflare account ID to list saved R2 tokens for',
+            demandOption: true,
+          })
+        }, listCredsCommand)
+        .command('rm-cred <account> [access-key-id]', 'List all R2 credentials saved', (yargs) => {
+          yargs
+            .positional('account', {
+              type: 'string',
+              description: 'The Cloudflare account ID to list saved R2 tokens for',
+              demandOption: true,
+            })
+            .positional('access-key-id', {
+              type: 'string',
+              description:
+                'The token ID to remove. If not specified you will be prompted to confirm which one to remove.',
+            })
+        }, removeCredCommand)
         .demandCommand(1, 1)
         .help('h')
         .alias('h', 'help')
@@ -48,7 +80,8 @@ const argv =
             } | {percentage}% | {value}/{total} | {eta_formatted} | {speed}`,
           }, cliProgress.Presets.shades_classic)
           return bar
-        }, moreHeaders), yargs)
+        }, moreHeaders)
+          .then(() => process.exit()), yargs)
     })
     .demandCommand(1, 1)
     .strict()

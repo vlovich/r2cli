@@ -2,14 +2,15 @@ import * as S3 from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { Command as AWSCommand } from '@aws-sdk/smithy-client'
 import * as AWSTypes from '@aws-sdk/types'
-import { SingleBar } from 'cli-progress'
+import colors from 'ansi-colors'
 import { sizeFormatter } from 'human-readable'
-import { createWriteStream } from 'node:fs'
+import inquirer from 'inquirer'
+import { accessSync, constants, createReadStream, createWriteStream, statSync } from 'node:fs'
 import { IncomingMessage } from 'node:http'
 import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { inspect } from 'node:util'
-import { ArgumentsCamelCase, Argv, string } from 'yargs'
+import { ArgumentsCamelCase, Argv } from 'yargs'
 import { retrieveConfig, retrieveOnlyConfig } from './config'
 import { ProgressBarCreator } from './main'
 
@@ -45,6 +46,11 @@ function addSaveOption<T>(yargs: Argv<T>): Argv<T & { 'save-body-to'?: string }>
     description: 'Save the body of the response to this file (use `-` to request stdout).',
   })
 }
+
+function addVerboseOption<T>(yargs: Argv<T>): Argv<T & { 'verbose'?: boolean }> {
+  return yargs.option('verbose', { alias: 'v', nargs: 0, boolean: true, description: 'Log the outbound request' })
+}
+
 export function buildS3Commands(
   commandHandler: <Cmd extends AWSCommand<any, any, any>>(
     args: ArgumentsCamelCase,
@@ -53,7 +59,7 @@ export function buildS3Commands(
   ) => Promise<void> | void,
   yargs: Argv,
 ): Argv {
-  return addAccountArg(addPresignArg(yargs))
+  return addVerboseOption(addAccountArg(addPresignArg(yargs)))
     .command('list-buckets', 'List the buckets currently created on your account.', (yargs) =>
       addHelp(yargs)
         .option('prefix', {
@@ -275,6 +281,11 @@ export function buildS3Commands(
     .group('head-object', 'Object')
     .command('get-object <bucket> <object>', 'Retrieve the object from the R2 bucket.', (yargs) =>
       addSaveOption(addObjectArg(addBucketArg(addHelp(yargs))))
+        .option('range', {
+          nargs: 1,
+          string: true,
+          description: 'The range of the body to retrieve. Specified in HTTP Range syntax.',
+        })
         .option('is-etag', {
           nargs: 1,
           string: true,
@@ -291,11 +302,6 @@ export function buildS3Commands(
           string: true,
           description:
             'Only returns a successful response if the specified object was uploaded before this date (If-Unmodified-Since header).',
-        })
-        .option('range', {
-          nargs: 1,
-          string: true,
-          description: 'The range of the body to retrieve. Specified in HTTP Range syntax.',
         })
         .option('uploaded-after', {
           nargs: 1,
@@ -352,6 +358,116 @@ export function buildS3Commands(
         }),
       ))
     .group('get-object', 'Object')
+    .command('put-object <bucket> <object> [file|string]', 'Upload an object to the R2 bucket.', (yargs) =>
+      addSaveOption(addObjectArg(addBucketArg(addHelp(yargs))))
+        .positional('file', {
+          type: 'string',
+          description:
+            'Unless --simple is provided, this is the filename. If not specified, then the object name is interpreted as the name of the file',
+        })
+        .option('simple', {
+          boolean: true,
+          nargs: 0,
+          desccription: 'Treat the input argument as a string instead of a file name.',
+        })
+        .option('is-etag', {
+          nargs: 1,
+          string: true,
+          description: 'R2 only attempts the upload if the provided ETag matches (If-Match header)',
+        })
+        .option('not-etag', {
+          nargs: 1,
+          string: true,
+          description: 'R2 only attempts the upload if the provided ETag does not matches (If-None-Match header)',
+        })
+        .option('uploaded-before', {
+          nargs: 1,
+          string: true,
+          description:
+            'R2 only attempts the upload if the specified object was uploaded before this date (If-Unmodified-Since header).',
+        })
+        .option('uploaded-after', {
+          nargs: 1,
+          string: true,
+          description:
+            'Only returns a successful response if the specified object was uploaded after this date (If-Modified-Since header).',
+        })
+        .option('cache-control', {
+          nargs: 1,
+          string: true,
+          description:
+            'Set the `cache-control` metadata header for this object which is rendered when the file is retrieved (unless overridden).',
+        })
+        .option('content-disposition', {
+          nargs: 1,
+          string: true,
+          description:
+            'Set the `content-disposition` metadata header for this object which is rendered when the file is retrieved (unless overridden).',
+        })
+        .option('content-encoding', {
+          nargs: 1,
+          string: true,
+          description:
+            'Set the `content-encoding` metadata header for this object which is rendered when the file is retrieved (unless overridden).',
+        })
+        .option('content-language', {
+          nargs: 1,
+          string: true,
+          description:
+            'Set the `content-language` metadata header for this object which is rendered when the file is retrieved (unless overridden).',
+        })
+        .option('content-type', {
+          nargs: 1,
+          string: true,
+          description:
+            'Set the `content-type` metadata header for this object which is rendered when the file is retrieved (unless overridden).',
+        })
+        .option('expires', {
+          nargs: 1,
+          string: true,
+          description:
+            'Set the `expires` metadata header for this object which is rendered when the file is retrieved (unless overridden).',
+        }), (argv) =>
+      commandHandler(
+        argv,
+        new S3.PutObjectCommand({
+          Bucket: argv['bucket'],
+          Key: argv['object'],
+          Body: (() => {
+            if (argv['simple']) {
+              if (argv.file === undefined) {
+                throw new Error('--simple provided but no value provided')
+              }
+              return argv
+                .file
+            }
+
+            // Can't interpret `-` because the file size is required.
+            return createReadStream(argv.file ?? argv.object, 'binary')
+          })(),
+          ContentLength: (() => {
+            if (argv['simple']) { return undefined }
+            return statSync(
+              argv.file ?? argv
+                .object,
+            )
+              .size
+          })(),
+          CacheControl: argv['cache-control'],
+          ContentDisposition: argv['content-disposition'],
+          ContentEncoding: argv['content-encoding'],
+          ContentLanguage: argv['content-language'],
+          ContentType: argv['content-type'],
+          Expires: argv['expires'] ? new Date(argv['expires']) : undefined,
+        }),
+        {
+          ...(argv['is-etag'] && { 'IfMatch': argv['is-etag'] }),
+          ...(argv['not-etag'] && { 'IfNoneMatch': argv['not-etag'] }),
+          ...(argv['uploaded-after'] && { 'IfModifiedSince': argv['uploaded-before'] }),
+          ...(argv['uploaded-before'] && { 'IfUnmodifiedSince': argv['uploaded-before'] }),
+        },
+      ))
+    .group('get-object', 'Object')
     .strict()
     .help('h')
     .alias('h', 'help')
@@ -376,7 +492,10 @@ function addHeaders<Input extends S3.ServiceInputTypes, Output extends S3.Servic
 }
 
 export type GenericCmdArgs = {
+  verbose?: boolean
   account?: string
+  bucket?: string
+  object?: string
   presign: boolean
   'save-body-to'?: string
   'expires-in'?: number
@@ -428,7 +547,38 @@ export async function handleS3Cmd<Command extends AWSCommand<any, any, any>>(
     region: 'auto',
     endpoint: `https://${config.val.account_id}.r2.cloudflarestorage.com`,
     credentials: { accessKeyId: config.val.access_key_id, secretAccessKey: config.val.secret_access_key },
+    forcePathStyle: true,
   })
+
+  if (argv.verbose) {
+    client.middlewareStack.add((next, context) => async (args) => {
+      const request = args.request as {
+        method: string
+        protocol: string
+        hostname: string
+        query?: Record<string, string>
+        headers?: Record<string, string>
+        path: string
+      }
+
+      const url = new URL(`${request.protocol}//${request.hostname}${request.path}`)
+      for (const [k, v] of Object.entries(request.query ?? {})) {
+        url.searchParams.set(k, v)
+      }
+
+      const curlHeaderArgs = Object.entries(request.headers ?? {}).flatMap(([k, v]) => ['-H', `'${k}: ${v}'`])
+
+      let serializedHeaderArgs = curlHeaderArgs.length === 0 ? '' : ' ' + colors.blue(curlHeaderArgs.join(' '))
+
+      let serializedCommandName = colors.green(context['commandName'])
+      let serializedMethod = colors.red(`-X ${request.method}`)
+      let serializedUrl = colors.grey(url.toString())
+
+      console.debug(`${serializedCommandName}: curl ${serializedMethod}${serializedHeaderArgs} '${serializedUrl}'`)
+
+      return await next(args)
+    }, { name: 'logRequest', step: 'finalizeRequest', priority: 'low' })
+  }
 
   if (argv.presign) {
     const now = new Date()
@@ -472,7 +622,10 @@ export async function handleS3Cmd<Command extends AWSCommand<any, any, any>>(
     console.info()
     console.info(`URL expires ${expiryDate.toUTCString()}`)
     console.info()
-    console.info(curlArgs.join(' '))
+    process.stdout.write((curlArgs.join(' ')))
+    if (process.stdout.isTTY) {
+      process.stdout.write('\n')
+    }
     return
   }
 
@@ -496,9 +649,42 @@ export async function handleS3Cmd<Command extends AWSCommand<any, any, any>>(
 
   if (body !== undefined) {
     if (argv['save-body-to'] === undefined) {
-      console.warn('The response from the request is not saved - please specify --save/-o')
-      return
+      if (argv['object'] !== undefined) {
+        // Infer the save location
+        let inferredSavePath = argv['object'].split('/').at(-1)!
+        argv['save-body-to'] = inferredSavePath
+      } else {
+        console.warn('The response from the request is not saved - please specify --save/-o')
+        return
+      }
     }
+
+    if (argv['save-body-to'] !== '-') {
+      try {
+        accessSync(argv['save-body-to'], constants.W_OK)
+
+        const prompt = inquirer.createPromptModule()
+        const answer = await prompt({
+          name: 'overwrite',
+          message: `${argv['save-body-to']} already exists and --save-body-to/-o was not provided. Overwrite?`,
+          type: 'confirm',
+          default: false,
+        })
+        if (!answer.overwrite) {
+          return
+        }
+      } catch (e) {
+        if (Object.prototype.hasOwnProperty.call(e, 'code') && (e as NodeJS.ErrnoException).code === 'ENOENT') {
+          // Creating a new file is fine.
+        } else {
+          console.error(`Unrecognized error trying to save to inferred location from object name.`, e)
+          process.exitCode = 1
+          return
+        }
+      }
+    }
+
+    // TODO(later): If dumping to stdout and stdout is connected to a TTY, prompt confirmation when file is > some threshold.
 
     let output = argv['save-body-to'] !== '-' ?
       createWriteStream(argv['save-body-to'], { encoding: 'binary' }) :
