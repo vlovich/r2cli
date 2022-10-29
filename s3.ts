@@ -368,7 +368,15 @@ export function buildS3Commands(
         .option('simple', {
           boolean: true,
           nargs: 0,
-          desccription: 'Treat the input argument as a string instead of a file name.',
+          description: 'Treat the input argument as a string instead of a file name.',
+        })
+        .option('meta', {
+          string: true,
+          nargs: 1,
+          array: true,
+          description:
+            'Supply k=v as an argument and this will send x-amz-meta-<k> with the value <v>. Can be specified repeatedly.',
+          demandOption: true,
         })
         .option('is-etag', {
           nargs: 1,
@@ -459,6 +467,17 @@ export function buildS3Commands(
           ContentLanguage: argv['content-language'],
           ContentType: argv['content-type'],
           Expires: argv['expires'] ? new Date(argv['expires']) : undefined,
+          Metadata: Object.fromEntries(argv['meta'].map((kv) => {
+            if (!kv.includes('=')) {
+              throw new Error(`Bad metadata '${kv}' - missing '=' between key and value`)
+            }
+            const [key, ...rest] = kv
+              .split('=')
+            return [
+              key,
+              rest.join('='),
+            ]
+          })),
         }),
         {
           ...(argv['is-etag'] && { 'IfMatch': argv['is-etag'] }),
@@ -622,7 +641,7 @@ export async function handleS3Cmd<Command extends AWSCommand<any, any, any>>(
     console.info()
     console.info(`URL expires ${expiryDate.toUTCString()}`)
     console.info()
-    process.stdout.write((curlArgs.join(' ')))
+    process.stdout.write(curlArgs.join(' '))
     if (process.stdout.isTTY) {
       process.stdout.write('\n')
     }
