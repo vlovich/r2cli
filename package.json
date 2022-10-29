@@ -4,7 +4,7 @@
   "description": "A simple command-line utility to make it easy to work with Cloudflare R2, a 0-egress cloud storage system.",
   "main": "main.ts",
   "scripts": {
-    "main": "tsx main.ts",
+    "main": "npx tsx main.ts",
     "format": "npx dprint fmt",
     "check-format": "npx dprint check",
     "test": "echo \"Error: no test specified\" && exit 1"
