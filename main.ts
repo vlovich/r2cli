@@ -1,9 +1,15 @@
+import colors from 'ansi-colors'
+import cliProgress from 'cli-progress'
 import process from 'node:process'
-import { Err, Ok, Result } from 'ts-results'
 import { ArgumentsCamelCase } from 'yargs'
 import yargs from 'yargs/yargs'
 import { importConfig, initConfig, listConfigs } from './config'
 import { buildS3Commands, GenericCmdArgs, handleS3Cmd } from './s3'
+
+interface ProgressBarOptions {
+  description: string
+}
+export type ProgressBarCreator = (options: ProgressBarOptions) => cliProgress.GenericBar
 
 const argv =
   yargs(process.argv.slice(2))
@@ -34,7 +40,15 @@ const argv =
     })
     .command('s3', 'Perform an action against the S3 endpoint', (yargs) => {
       buildS3Commands((argv, cmd, moreHeaders) =>
-        handleS3Cmd(argv as ArgumentsCamelCase<GenericCmdArgs>, cmd, moreHeaders), yargs)
+        handleS3Cmd(argv as ArgumentsCamelCase<GenericCmdArgs>, cmd, (options) => {
+          const bar = new cliProgress
+            .SingleBar({
+            format: `${options.description} | ${
+              colors.cyan('{bar}')
+            } | {percentage}% | {value}/{total} | {eta_formatted} | {speed}`,
+          }, cliProgress.Presets.shades_classic)
+          return bar
+        }, moreHeaders), yargs)
     })
     .demandCommand(1, 1)
     .strict()

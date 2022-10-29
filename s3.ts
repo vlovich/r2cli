@@ -2,9 +2,16 @@ import * as S3 from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { Command as AWSCommand } from '@aws-sdk/smithy-client'
 import * as AWSTypes from '@aws-sdk/types'
+import { SingleBar } from 'cli-progress'
+import { sizeFormatter } from 'human-readable'
+import { createWriteStream } from 'node:fs'
+import { IncomingMessage } from 'node:http'
+import { Transform } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { inspect } from 'node:util'
 import { ArgumentsCamelCase, Argv, string } from 'yargs'
 import { retrieveConfig, retrieveOnlyConfig } from './config'
+import { ProgressBarCreator } from './main'
 
 export { Command as AWSCommand } from '@aws-sdk/smithy-client'
 
@@ -18,31 +25,26 @@ function addAccountArg<T>(yargs: Argv<T>): Argv<T & { account?: string }> {
 }
 
 function addBucketArg<T>(yargs: Argv<T>): Argv<T & { bucket: string }> {
-  return yargs.option('bucket', {
-    alias: 'b',
-    string: true,
-    description: 'The name of the bucket.',
-    requiresArg: true,
-    nargs: 1,
-    demandOption: true,
-  })
+  return yargs.positional('bucket', { type: 'string', describe: 'The name of the bucket.', demandOption: true })
 }
 
 function addObjectArg<T>(yargs: Argv<T>): Argv<T & { object: string }> {
-  return yargs.option('object', {
-    alias: 'o',
-    string: true,
-    description: 'The name of the object.',
-    requiresArg: true,
-    nargs: 1,
-    demandOption: true,
-  })
+  return yargs.positional('object', { type: 'string', describe: 'The name of the object.', demandOption: true })
 }
 
 function addHelp(yargs: Argv): Argv {
   return yargs.option('h', { alias: 'help', description: 'Print more information about this command' })
 }
 
+function addSaveOption<T>(yargs: Argv<T>): Argv<T & { 'save-body-to'?: string }> {
+  return yargs.option('save-body-to', {
+    alias: 'o',
+    requiresArg: true,
+    nargs: 1,
+    string: true,
+    description: 'Save the body of the response to this file (use `-` to request stdout).',
+  })
+}
 export function buildS3Commands(
   commandHandler: <Cmd extends AWSCommand<any, any, any>>(
     args: ArgumentsCamelCase,
@@ -90,7 +92,7 @@ export function buildS3Commands(
         },
       ))
     .group('list-buckets', 'Account')
-    .command('create-bucket', 'Create a new R2 bucket.', (yargs) =>
+    .command('create-bucket <bucket>', 'Create a new R2 bucket.', (yargs) =>
       addBucketArg(addHelp(yargs))
         .option('location', {
           alias: 'l',
@@ -108,18 +110,18 @@ export function buildS3Commands(
         }),
       ))
     .group('create-bucket', 'Bucket')
-    .command('head-bucket', 'Check if an R2 bucket exists.', (yargs) =>
+    .command('head-bucket <bucket>', 'Check if an R2 bucket exists.', (yargs) =>
       addBucketArg(addHelp(yargs)), (argv) =>
       commandHandler(
         argv,
         new S3.HeadBucketCommand({ Bucket: argv['bucket'] }),
       ))
     .group('head-bucket', 'Bucket')
-    .command('get-bucket-encryption', 'Get the encryption currently set on the R2 bucket.', (yargs) =>
+    .command('get-bucket-encryption <bucket>', 'Get the encryption currently set on the R2 bucket.', (yargs) =>
       addBucketArg(addHelp(yargs)), (argv) =>
       commandHandler(argv, new S3.GetBucketEncryptionCommand({ Bucket: argv['bucket'] })))
     .group('get-bucket-encryption', 'Bucket')
-    .command('get-bucket-location', 'Get the location of a R2 bucket.', (yargs) =>
+    .command('get-bucket-location <bucket>', 'Get the location of a R2 bucket.', (yargs) =>
       addBucketArg(addHelp(yargs)), (argv) =>
       commandHandler(
         argv,
@@ -127,7 +129,7 @@ export function buildS3Commands(
       ))
     .group('get-bucket-location', 'Bucket')
     .command(
-      'get-bucket-cors',
+      'get-bucket-cors <bucket>',
       'Get the CORS rules associated with this R2 bucket.',
       (yargs) => addBucketArg(addHelp(yargs)),
       (argv) => commandHandler(argv, new S3.GetBucketCorsCommand({ Bucket: argv['bucket'] })),
@@ -143,56 +145,51 @@ export function buildS3Commands(
         CORSRules: []
       } }))*/
     )
-    .group('put-bucket-cors', 'Bucket')
+    .group('put-bucket-cors <bucket>', 'Bucket')
     .command(
-      'delete-bucket-cors',
+      'delete-bucket-cors <bucket>',
       'Delete the CORS rules for this R2 bucket.',
       (yargs) => addBucketArg(addHelp(yargs)),
       (argv) => commandHandler(argv, new S3.DeleteBucketCorsCommand({ Bucket: argv['bucket'] })),
     )
     .group('delete-bucket-cors', 'Bucket')
-    .command(
-      'list-objects-v1',
-      'List objects on this R2 bucket using the deprecated S3 V1 API (useful to testing compatibility with older S3 tools).',
-      (yargs) =>
-        addBucketArg(addHelp(yargs))
-          .option('prefix', { nargs: 1, string: true, description: 'Only match keys that start with this value.' })
-          .option('delimiter', {
-            nargs: 1,
-            string: true,
-            description: 'Group keys by this value (use / to get a traditional hierarchical view of your objects).',
-          })
-          .option('url-encode', {
-            nargs: 0,
-            description:
-              'Strings in the responses are rendered URL-encoded in case you are using an XML 1.0 parser and are processing unicode values.',
-          })
-          .option('max-keys', {
-            nargs: 1,
-            number: true,
-            description: 'Provide an option in case you want fewer than 1000 objects returned.',
-          })
-          .option('marker', {
-            nargs: 1,
-            string: true,
-            description:
-              'Provide a string that all retrieved keys must be lexicographically larger than (see start-after in normal list-objects).',
-          }),
-      (argv) =>
-        commandHandler(
-          argv,
-          new S3.ListObjectsCommand({
-            Bucket: argv['bucket'],
-            Prefix: argv['prefix'],
-            Delimiter: argv['delimiter'],
-            EncodingType: argv['url-encode'] ? 'url' : undefined,
-            MaxKeys: argv['max-keys'],
-            Marker: argv['marker'],
-          }),
-        ),
-    )
+    .command('list-objects-v1 <bucket>', `List objects on this R2 bucket using S3's deprecated V1 API`, (yargs) =>
+      addBucketArg(addHelp(yargs))
+        .option('prefix', { nargs: 1, string: true, description: 'Only match keys that start with this value.' })
+        .option('delimiter', {
+          nargs: 1,
+          string: true,
+          description: 'Group keys by this value (use / to get a traditional hierarchical view of your objects).',
+        })
+        .option('url-encode', {
+          nargs: 0,
+          description:
+            'Strings in the responses are rendered URL-encoded in case you are using an XML 1.0 parser and are processing unicode values.',
+        })
+        .option('max-keys', {
+          nargs: 1,
+          number: true,
+          description: 'Provide an option in case you want fewer than 1000 objects returned.',
+        })
+        .option('marker', {
+          nargs: 1,
+          string: true,
+          description:
+            'Provide a string that all retrieved keys must be lexicographically larger than (see start-after in normal list-objects).',
+        }), (argv) =>
+      commandHandler(
+        argv,
+        new S3.ListObjectsCommand({
+          Bucket: argv['bucket'],
+          Prefix: argv['prefix'],
+          Delimiter: argv['delimiter'],
+          EncodingType: argv['url-encode'] ? 'url' : undefined,
+          MaxKeys: argv['max-keys'],
+          Marker: argv['marker'],
+        }),
+      ))
     .group('list-objects-v1', 'Bucket')
-    .command('list-objects', 'List objects on this R2 bucket using the recommended S3 API.', (yargs) =>
+    .command('list-objects <bucket>', 'List objects on this R2 bucket using the recommended S3 API.', (yargs) =>
       addBucketArg(addHelp(yargs))
         .option('prefix', { nargs: 1, string: true, description: 'Only match keys that start with this value.' })
         .option('delimiter', {
@@ -233,7 +230,7 @@ export function buildS3Commands(
         }),
       ))
     .group('list-objects', 'Bucket')
-    .command('head-object', 'Check if the object exists in the R2 bucket.', (yargs) =>
+    .command('head-object <bucket> <object>', 'Check if the object exists in the R2 bucket.', (yargs) =>
       addObjectArg(addBucketArg(addHelp(yargs)))
         .option('is-etag', {
           nargs: 1,
@@ -276,8 +273,8 @@ export function buildS3Commands(
         }),
       ))
     .group('head-object', 'Object')
-    .command('get-object', 'Retrieve the object from the R2 bucket.', (yargs) =>
-      addObjectArg(addBucketArg(addHelp(yargs)))
+    .command('get-object <bucket> <object>', 'Retrieve the object from the R2 bucket.', (yargs) =>
+      addSaveOption(addObjectArg(addBucketArg(addHelp(yargs))))
         .option('is-etag', {
           nargs: 1,
           string: true,
@@ -381,13 +378,40 @@ function addHeaders<Input extends S3.ServiceInputTypes, Output extends S3.Servic
 export type GenericCmdArgs = {
   account?: string
   presign: boolean
+  'save-body-to'?: string
   'expires-in'?: number
   'sign-header'?: string | string[]
+}
+
+function addPresignArg<T>(yargs: Argv<T>): Argv<T> {
+  return yargs
+    .option('presign', {
+      description: 'Generate a pre-signed URL for this command.',
+      nargs: 0,
+      boolean: true,
+      implies: 'expires-in',
+    })
+    .option('expires-in', {
+      description:
+        'After this many seconds in the future, the signed URL will stop working. Default is 1 day. Maximum is 7 days.',
+      nargs: 1,
+      requiresArg: true,
+      number: true,
+      default: 86400,
+    })
+    .option('sign-header', {
+      description:
+        'Specify as many times with an argument of key=value to sign the headers to require this key and value (can just keep applying key=value or specify --sign-header multiple times). Failing to supply these exact headers and values in the request will cause it to fail.',
+      string: true,
+      nargs: 1,
+    })
+    .strict()
 }
 
 export async function handleS3Cmd<Command extends AWSCommand<any, any, any>>(
   argv: ArgumentsCamelCase<GenericCmdArgs>,
   command: Command,
+  progressBarCreator: ProgressBarCreator,
   headers?: Record<string, string>,
 ): Promise<void> {
   if (headers === undefined) {
@@ -452,36 +476,71 @@ export async function handleS3Cmd<Command extends AWSCommand<any, any, any>>(
     return
   }
 
+  let body: IncomingMessage | undefined
+  let bodyLength: number | undefined
   try {
-    const response = await client.send(addHeaders(command, headers))
+    const response = await client.send(addHeaders(command, headers)) as {
+      Body?: IncomingMessage
+      ContentLength?: number
+    }
+    body = response.Body
+    bodyLength = response.ContentLength
+    delete response['Body']
     console.info(inspect(response, { depth: null, colors: true }))
   } catch (e) {
     const err = (e as Error & AWSTypes.MetadataBearer)
     console.error(`Failed ${argv._.join(' ')}: ${err['$metadata']['httpStatusCode']} ${err.message}`)
+    process.exitCode = 1
+    return
   }
-}
 
-function addPresignArg<T>(yargs: Argv<T>): Argv<T> {
-  return yargs
-    .option('presign', {
-      description: 'Generate a pre-signed URL for this command.',
-      nargs: 0,
-      boolean: true,
-      implies: 'expires-in',
-    })
-    .option('expires-in', {
-      description:
-        'After this many seconds in the future, the signed URL will stop working. Default is 1 day. Maximum is 7 days.',
-      nargs: 1,
-      requiresArg: true,
-      number: true,
-      default: 86400,
-    })
-    .option('sign-header', {
-      description:
-        'Specify as many times with an argument of key=value to sign the headers to require this key and value (can just keep applying key=value or specify --sign-header multiple times). Failing to supply these exact headers and values in the request will cause it to fail.',
-      string: true,
-      nargs: 1,
-    })
-    .strict()
+  if (body !== undefined) {
+    if (argv['save-body-to'] === undefined) {
+      console.warn('The response from the request is not saved - please specify --save/-o')
+      return
+    }
+
+    let output = argv['save-body-to'] !== '-' ?
+      createWriteStream(argv['save-body-to'], { encoding: 'binary' }) :
+      process.stdout
+
+    if (bodyLength !== undefined && argv['save-body-to'] !== '-') {
+      const progressBar = progressBarCreator({ description: argv['save-body-to'] })
+      progressBar.start(bodyLength, 0, { speed: 'N/A' })
+
+      const speedFormat = sizeFormatter({ std: 'IEC', decimalPlaces: 2, keepTrailingZeroes: false })
+
+      let measurementStart = Date.now()
+      await pipeline(
+        body,
+        new Transform({
+          transform(chunk, encoding, callback) {
+            const elapsedSeconds = (Date.now() - measurementStart) / 1000
+            const bytesTransferred = chunk.length
+            const throughput = bytesTransferred / elapsedSeconds
+
+            progressBar.increment(chunk.length, { speed: `${speedFormat(throughput)}/s` })
+            this.push(chunk, encoding)
+            callback()
+          },
+        }),
+        output,
+      )
+
+      progressBar.stop()
+    } else {
+      body!.pipe(output)
+
+      await Promise.all([
+        new Promise<void>((resolve, reject) => {
+          body!.once('end', resolve)
+          body!.once('error', reject)
+        }),
+        new Promise<void>((resolve, reject) => {
+          output.once('end', resolve)
+          output.once('error', reject)
+        }),
+      ])
+    }
+  }
 }
