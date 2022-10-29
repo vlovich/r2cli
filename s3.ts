@@ -10,7 +10,7 @@ import { IncomingMessage } from 'node:http'
 import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { inspect } from 'node:util'
-import { ArgumentsCamelCase, Argv } from 'yargs'
+import { ArgumentsCamelCase, Argv, demandOption } from 'yargs'
 import { retrieveConfig, retrieveOnlyConfig } from './config'
 import { ProgressBarCreator } from './main'
 
@@ -175,7 +175,7 @@ export function buildS3Commands(
         .option('max-keys', {
           nargs: 1,
           number: true,
-          description: 'Provide an option in case you want fewer than 1000 objects returned.',
+          description: 'Provide an option in case you want fewer than 1,000 objects returned.',
         })
         .option('marker', {
           nargs: 1,
@@ -212,7 +212,7 @@ export function buildS3Commands(
         .option('max-keys', {
           nargs: 1,
           number: true,
-          description: 'Provide an option in case you want fewer than 1000 objects returned.',
+          description: 'Provide an option in case you want fewer than 1,000 objects returned.',
         })
         .option('start-after', {
           nargs: 1,
@@ -486,7 +486,36 @@ export function buildS3Commands(
           ...(argv['uploaded-before'] && { 'IfUnmodifiedSince': argv['uploaded-before'] }),
         },
       ))
-    .group('get-object', 'Object')
+    .group('put-object', 'Object')
+    .command('delete-object <bucket> <object> [file|string]', 'Delete a single R2 object.', (yargs) =>
+      addObjectArg(addBucketArg(addHelp(yargs))), (argv) =>
+      commandHandler(
+        argv,
+        new S3.DeleteObjectCommand({ Bucket: argv['bucket'], Key: argv['object'] }),
+      ))
+    .group('delete-object', 'Object')
+    .command('delete-objects <bucket> <object> [<object>..]', 'Delete many objects at once, up to 1,000.', (yargs) =>
+      addBucketArg(addHelp(yargs))
+        .option('quiet', { alias: 'q', type: 'boolean', nargs: 0, description: 'Request the response to be quieter.' })
+        .positional('object', {
+          type: 'string',
+          array: true,
+          description: 'The name of the object to delete',
+          demandOption: true,
+        }), (argv) =>
+      commandHandler(
+        argv,
+        new S3.DeleteObjectsCommand({
+          Bucket: argv['bucket'],
+          Delete: {
+            Objects: argv['object'].map((Key) => ({ Key })),
+            Quiet: argv.quiet ?
+              true :
+              undefined,
+          },
+        }),
+      ))
+    .group('delete-object', 'Object')
     .strict()
     .help('h')
     .alias('h', 'help')
@@ -614,11 +643,15 @@ export async function handleS3Cmd<Command extends AWSCommand<any, any, any>>(
     }
     addHeaders(command, headers)
 
-    let method: 'GET' | 'HEAD' | 'PUT' | 'DELETE'
+    let method: 'GET' | 'HEAD' | 'PUT' | 'DELETE' | 'POST'
     if (command.constructor.name.startsWith('Put')) {
       method = 'GET'
     } else if (command.constructor.name.startsWith('Delete')) {
-      method = 'DELETE'
+      if (command.constructor.name.startsWith('DeleteObjects')) {
+        method = 'POST'
+      } else {
+        method = 'DELETE'
+      }
     } else if (command.constructor.name.startsWith('Head')) {
       method = 'HEAD'
     } else {
