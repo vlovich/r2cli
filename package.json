@@ -1,6 +1,6 @@
 {
-  "name": "r2cli",
-  "version": "1.0.0",
+  "name": "@vlovich/r2cli",
+  "version": "0.1.0",
   "description": "A simple command-line utility to make it easy to work with Cloudflare R2, a 0-egress cloud storage system.",
   "main": "main.ts",
   "scripts": {
