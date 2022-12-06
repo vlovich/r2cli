@@ -207,7 +207,7 @@ async function loadKeytar(): Promise<Result<typeof import('keytar'), Error>> {
         } to install libsecret. You may be prompted for a password.`,
       )
 
-      execFileSync('/usr/bin/sudo', installCommand, { encoding: 'utf-8' })
+      execFileSync('/usr/bin/sudo', installCommand, { encoding: 'utf-8', input: 'inherit', stdio: 'inherit' })
     }
   }
 
