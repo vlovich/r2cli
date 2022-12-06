@@ -187,7 +187,7 @@ async function loadKeytar(): Promise<Result<typeof import('keytar'), Error>> {
             return ['pacman', '-S', 'libsecret']
           case 'Ubuntu':
           case 'Debian GNU/Linux':
-            return ['pacman', '-S', 'libsecret-1-dev']
+            return ['apt', 'install', 'libsecret-1-dev']
           case 'Fedora':
             return ['yum', 'install', 'libsecret-devel']
           default:
